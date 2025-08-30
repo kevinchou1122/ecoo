@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EcoCosmetics — Debuggable (escapeHtml fixed)</title>
+  <meta name="description" content="Debug-friendly single-file site with defensive HTML escaping and extra tests." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900 p-6">
+  <main class="mx-auto max-w-4xl">
+    <header class="mb-4">
+      <h1 class="text-2xl font-bold">EcoCosmetics — Debuggable (escapeHtml fixed)</h1>
+      <p class="text-sm text-slate-600">This version fixes the "replace of undefined" error by making <code>escapeHtml</code> defensive, adds an extra offline sample that purposefully lacks fields (to test undefined handling), and keeps the fetch diagnostics + tests.</p>
+    </header>
+
+    <section class="grid md:grid-cols-3 gap-4">
+      <div class="p-4 rounded border bg-white">
+        <h2 class="font-semibold mb-2">Manual barcode</h2>
+        <form id="manualForm" class="flex gap-2">
+          <input id="barcodeInput" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 3600522213601" class="w-full rounded px-3 py-2 border" />
+          <button type="submit" class="px-3 py-2 rounded bg-emerald-600 text-white">Lookup</button>
+        </form>
+        <div class="mt-3 text-xs text-slate-600">If network requests fail, use the <strong>Use offline sample</strong> button below to test UI with bundled data.</div>
+        <div class="mt-3 flex gap-2">
+          <button id="useSample" class="px-3 py-2 rounded bg-sky-600 text-white text-sm">Use offline sample</button>
+          <button id="diagnoseBtn" class="px-3 py-2 rounded bg-amber-500 text-white text-sm">Run fetch diagnostic</button>
+          <button id="runTestsBtn" class="px-3 py-2 rounded bg-violet-600 text-white text-sm">Run tests</button>
+        </div>
+      </div>
+
+      <div class="md:col-span-2 p-4 rounded border bg-white">
+        <h3 class="font-semibold">Product details</h3>
+        <div id="productCard" class="mt-2 text-sm text-slate-700">Scan or enter a barcode to see details…</div>
+        <hr class="my-3" />
+        <h3 class="font-semibold">Eco-impact (beta)</h3>
+        <div id="ecoCard" class="mt-2 text-sm text-slate-700">Add a product to get a quick assessment.</div>
+      </div>
+    </section>
+
+    <section class="mt-6 grid md:grid-cols-2 gap-4">
+      <div class="p-4 rounded border bg-white">
+        <h3 class="font-semibold mb-2">Manual ingredients (paste & analyze)</h3>
+        <textarea id="ingredientsManual" rows="4" class="w-full border rounded px-2 py-2" placeholder="Paste ingredient list (comma separated) and press Analyze"></textarea>
+        <div class="mt-2 flex gap-2">
+          <button id="analyzeManual" class="px-3 py-2 rounded bg-emerald-600 text-white">Analyze</button>
+          <button id="clearManual" class="px-3 py-2 rounded border">Clear</button>
+        </div>
+      </div>
+
+      <div class="p-4 rounded border bg-white">
+        <h3 class="font-semibold mb-2">Diagnostics & logs</h3>
+        <div id="logArea" class="h-48 overflow-auto bg-slate-50 border rounded p-2 text-xs mono"></div>
+      </div>
+    </section>
+
+    <footer class="mt-6 text-xs text-slate-600">If you see <strong>TypeError: Failed to fetch</strong>, your current environment (sandbox/test runner) likely blocks outgoing HTTP requests. To fully test network lookups, open this file in a normal browser (served via GitHub Pages or a local static server like <code>npx http-server</code>), or use the offline sample below.</footer>
+  </main>
+
+<script>
+// ---------- Offline sample data (used when network fetch fails) ----------
+const SAMPLE_PRODUCTS = {
+  // Real barcode used as a functional test. This is simplified sample data for offline testing.
+  '3600522213601': {
+    product_name: "L'Oréal Paris Hydrating Serum (sample)",
+    brands: "L'Oréal Paris",
+    ingredients_text: "Aqua, Glycerin, Paraben, PEG-40, Polyethylene (microplastics)"
+  },
+  '1234567890123': {
+    product_name: "Mock Sunscreen (sample)",
+    brands: "MockBrand",
+    ingredients_text: "Octocrylene, Oxybenzone, Homosalate, Aqua"
+  },
+  // EXTRA TEST CASE: intentionally minimal object with missing fields to trigger defensive handling
+  '0000000000001': {
+    // intentionally empty: tests code's ability to handle undefined product_name/ingredients
+  }
+};
+
+// ---------- UI refs ----------
+const manualForm = document.getElementById('manualForm');
+const barcodeInput = document.getElementById('barcodeInput');
+const productCard = document.getElementById('productCard');
+const ecoCard = document.getElementById('ecoCard');
+const logArea = document.getElementById('logArea');
+const useSampleBtn = document.getElementById('useSample');
+const diagnoseBtn = document.getElementById('diagnoseBtn');
+const runTestsBtn = document.getElementById('runTestsBtn');
+const ingredientsManual = document.getElementById('ingredientsManual');
+const analyzeManual = document.getElementById('analyzeManual');
+const clearManual = document.getElementById('clearManual');
+
+// ---------- Helpers ----------
+function appendLog(...parts){
+  const time = new Date().toLocaleTimeString();
+  logArea.innerHTML = `<div><strong>[${time}]</strong> ${parts.map(p=>escapeHtml(String(p))).join(' ')}</div>` + logArea.innerHTML;
+}
+
+// Defensive escapeHtml: never assume input is a string. Return empty string for null/undefined.
+function escapeHtml(s){
+  if (s === null || s === undefined) return '';
+  const str = String(s);
+  return str.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
+}
+
+// ---------- Form handling ----------
+manualForm.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  const code = (barcodeInput.value || '').trim();
+  if(!code){ appendLog('No barcode provided.'); return; }
+  lookupBarcode(code);
+});
+
+useSampleBtn.addEventListener('click', ()=>{
+  // fill with a sample and run lookup (works offline)
+  barcodeInput.value = '3600522213601';
+  appendLog('Using offline sample: 3600522213601');
+  lookupBarcode('3600522213601');
+});
+
+analyzeManual.addEventListener('click', ()=>{
+  const txt = (ingredientsManual.value || '').trim();
+  if(!txt){ appendLog('No ingredients pasted.'); return; }
+  renderEco(txt, {source: 'manual'});
+});
+clearManual.addEventListener('click', ()=>{ ingredientsManual.value = ''; });
+
+// ---------- Fetch with timeout & diagnostics ----------
+async function fetchWithTimeout(url, options={}, timeout=8000){
+  const controller = new AbortController();
+  const id = setTimeout(()=> controller.abort(), timeout);
+  try{
+    const res = await fetch(url, { signal: controller.signal, ...options });
+    clearTimeout(id);
+    return res;
+  }catch(err){
+    clearTimeout(id);
+    throw err;
+  }
+}
+
+async function fetchProductFromOBF(code){
+  const url = `https://world.openbeautyfacts.org/api/v2/product/${encodeURIComponent(code)}.json`;
+  appendLog('Attempting OBF fetch for', code, url);
+  try{
+    const res = await fetchWithTimeout(url, {}, 9000);
+    appendLog('OBF fetch response status:', res.status);
+    if(!res.ok) return null;
+    const data = await res.json();
+    if(data && (data.status === 1 || data.product)) return data.product || null;
+    return null;
+  }catch(err){
+    appendLog('OBF fetch failed:', err && err.message ? err.message : String(err));
+    throw err; // rethrow to allow the caller to decide fallback
+  }
+}
+
+async function fetchProductFromOFF(code){
+  const url = `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(code)}.json`;
+  appendLog('Attempting OFF fetch for', code, url);
+  try{
+    const res = await fetchWithTimeout(url, {}, 9000);
+    appendLog('OFF fetch response status:', res.status);
+    if(!res.ok) return null;
+    const data = await res.json();
+    if(data && (data.status === 1 || data.product)) return data.product || null;
+    return null;
+  }catch(err){
+    appendLog('OFF fetch failed:', err && err.message ? err.message : String(err));
+    throw err;
+  }
+}
+
+// ---------- Main lookup (tries OBF -> OFF -> local sample) ----------
+async function lookupBarcode(code){
+  productCard.textContent = `Looking up ${code} ...`;
+  ecoCard.textContent = 'Analyzing ingredients…';
+  let prod = null;
+  let lastNetworkError = null;
+
+  // Try OBF, but don't let one failure (network error) stop OFF/fallback checks
+  try{
+    prod = await fetchProductFromOBF(code);
+  }catch(err){
+    lastNetworkError = err;
+    appendLog('OBF network error:', err && err.message ? err.message : String(err));
+    // continue to try OFF
+  }
+
+  if(!prod){
+    // inform user we're trying OFF
+    appendLog('No product from OBF, trying Open Food Facts (OFF)...');
+    try{
+      prod = await fetchProductFromOFF(code);
+    }catch(err){
+      lastNetworkError = err;
+      appendLog('OFF network error:', err && err.message ? err.message : String(err));
+    }
+  }
+
+  if(prod){
+    appendLog('Product found from network (or data returned). Rendering...');
+    renderProduct(prod);
+    const ingredientsText = extractIngredientsText(prod);
+    if(ingredientsText) renderEco(ingredientsText, prod);
+    else { ecoCard.textContent = 'Ingredients not available.'; }
+    return;
+  }
+
+  // If network attempts failed or product not found, try offline sample data so user can still test the UI.
+  if(SAMPLE_PRODUCTS[code]){
+    appendLog('Using bundled offline sample for', code);
+    const sample = SAMPLE_PRODUCTS[code];
+    renderProduct(sample);
+    renderEco(sample.ingredients_text || sample.ingredients || '', sample);
+    return;
+  }
+
+  // final failure: provide helpful error message and suggestions
+  const errMsgParts = [];
+  if(lastNetworkError){
+    errMsgParts.push('Network request failed.');
+    errMsgParts.push('Error: ' + (lastNetworkError.message || String(lastNetworkError)));
+    errMsgParts.push('This usually means the environment blocks outgoing HTTP requests ("TypeError: Failed to fetch").');
+    errMsgParts.push('To fix: open this page in a browser with network access (GitHub Pages or local static server) or use the offline sample.');
+  } else {
+    errMsgParts.push(`No product found for ${code} in Open Beauty/Food Facts.`);
+    errMsgParts.push('You may contribute the product to Open Beauty Facts or try a different barcode.');
+  }
+
+  productCard.innerHTML = '<div class="text-sm text-rose-700">' + escapeHtml(errMsgParts.join(' ')) + '</div>';
+  ecoCard.textContent = '—';
+}
+
+// ---------- Helpers for product data shapes ----------
+function extractIngredientsText(prod){
+  if(!prod) return '';
+  // OBF/OFF sometimes include array prod.ingredients with objects, sometimes a single text field.
+  if(Array.isArray(prod.ingredients) && prod.ingredients.length){
+    const names = prod.ingredients.map(i => i && (i.text || i.id || i.name || i.raw_text) || '').filter(Boolean);
+    if(names.length) return names.join(', ');
+  }
+  // common text fields
+  return prod.ingredients_text || prod.ingredients_text_en || prod.ingredients_text_fr || prod.ingredients_text_es || prod.ingredient_text || prod.ingredients || '';
+}
+
+function renderProduct(p){
+  // Defensive: p may be undefined or missing fields
+  const nameRaw = (p && (p.product_name || p.product_name_en || p.name)) || 'Unknown product';
+  const brandRaw = (p && (p.brands || p.brand)) || (p && Array.isArray(p.brands_tags) ? p.brands_tags.join(', ') : (p && p.brands_tags)) || '';
+  const name = escapeHtml(nameRaw);
+  const brand = escapeHtml(brandRaw);
+  const rawIngredients = extractIngredientsText(p) || '';
+  const ingredients = escapeHtml(rawIngredients || '—');
+
+  productCard.innerHTML = `
+    <div>
+      <div class="text-lg font-semibold">${name}</div>
+      <div class="text-sm text-slate-600">${brand}</div>
+      <div class="mt-2 text-sm"><strong>Ingredients:</strong> <div class="mt-1">${ingredients}</div></div>
+      <div class="mt-2 text-xs text-slate-500">Source: network or offline sample</div>
+    </div>`;
+}
+
+// ---------- Simple eco heuristics (same idea as before, small set) ----------
+const RULES = [
+  { pattern: /microbead|microplast|polyethylene\b|polypropylene\b|polymethyl\s*methacrylate|pmma|nylon-?\d+/i, label: 'Microplastics / plastic polymers', impact: 25, why: 'Persistent microplastics can accumulate in aquatic environments.' },
+  { pattern: /cyclo(tetra|penta|hexa)siloxane|\bD[456]\b|cyclopentasiloxane/i, label: 'Cyclic silicones (D4/D5/D6)', impact: 20, why: 'Some are bioaccumulative; restrictions exist for some uses.' },
+  { pattern: /oxybenzone|octinoxate|octocrylene|homosalate|ethy?lhexyl\s*methoxycinnamate/i, label: 'UV filters of concern', impact: 15, why: 'Certain UV filters have ecological concerns (reef impact).' },
+  { pattern: /triclosan|triclocarban/i, label: 'Antibacterial agents', impact: 20, why: 'Persistent and toxic to aquatic life.' },
+  { pattern: /paraben/i, label: 'Parabens', impact: 8, why: 'Under scrutiny for environmental persistence.' },
+  { pattern: /bht\b|butylated\s*hydroxytoluene/i, label: 'BHT', impact: 6, why: 'Potential aquatic toxicity; persistence concerns.' },
+  { pattern: /fragrance|parfum/i, label: 'Fragrance (unspecified)', impact: 4, why: 'Fragrance mixes can include persistent musks; details often undisclosed.' },
+  { pattern: /peg-?\d+|polyethylene\s*glycol/i, label: 'PEGs', impact: 4, why: 'Manufacturing byproducts and aquatic concerns (context-dependent).' },
+];
+
+function analyzeEco(ingredientsText){
+  const text = String(ingredientsText || '').toLowerCase();
+  let score = 100; const hits = [];
+  for(const r of RULES){ if(r.pattern.test(text)){ score -= r.impact; hits.push({label: r.label, why: r.why, impact: r.impact}); } }
+  score = Math.max(0, Math.min(100, score));
+  let verdict = 'Mixed';
+  if(score >= 85) verdict = 'Likely eco-friendlier';
+  else if(score >= 65) verdict = 'Generally okay with caveats';
+  else if(score >= 40) verdict = 'Concerning';
+  else verdict = 'High concern';
+  return { score, verdict, hits };
+}
+
+function renderEco(ingredientsText, prod={}){
+  const { score, verdict, hits } = analyzeEco(ingredientsText);
+  const hitHtml = hits.length ? hits.map(h=>`<li class="mb-1"><strong>${escapeHtml(h.label)}</strong> — ${escapeHtml(h.why)} <span class="text-xs">(-${h.impact})</span></li>`).join('') : '<li class="opacity-70">No flags matched our simple rules.</li>';
+  ecoCard.innerHTML = `
+    <div>
+      <div class="flex items-center justify-between"><div class="font-semibold">${escapeHtml(verdict)}</div><div class="font-mono text-sm">Score: ${score}/100</div></div>
+      <div class="mt-2 text-sm"><strong>Flags</strong><ul class="mt-1 pl-4 text-sm">${hitHtml}</ul></div>
+      <div class="mt-2 text-xs text-slate-500">Heuristic check — not a substitute for regulatory or certified eco-label assessments.</div>
+    </div>`;
+}
+
+// ---------- Diagnostics button ----------
+diagnoseBtn.addEventListener('click', async ()=>{
+  appendLog('Starting diagnostic: attempting to fetch a small OBF resource (sample product).');
+  const sampleCode = '3600522213601';
+  const url = `https://world.openbeautyfacts.org/api/v2/product/${encodeURIComponent(sampleCode)}.json`;
+  try{
+    const res = await fetchWithTimeout(url, {}, 6000);
+    appendLog('Fetch succeeded. Status:', res.status);
+    const txt = await res.text();
+    appendLog('Response length (chars):', txt.length);
+    appendLog('You can now try lookup again in this environment if fetch succeeded.');
+  }catch(err){
+    appendLog('Diagnostic fetch failed:', err && err.message ? err.message : String(err));
+    appendLog('If you see "TypeError: Failed to fetch", your environment likely blocks outgoing HTTP requests.');
+    appendLog('To fully test network lookups: open this file in a normal browser (GitHub Pages or local static server) or use the offline sample.');
+  }
+});
+
+// ---------- Basic test runner (UI-only) ----------
+runTestsBtn.addEventListener('click', async ()=>{
+  appendLog('Running tests: sample present, missing-fields sample, invalid code.');
+  // Test 1: known sample (bundled) — should render even if network blocked
+  await lookupBarcode('3600522213601');
+  // Test 2: missing fields sample — should not throw when fields undefined
+  await lookupBarcode('0000000000001');
+  // Test 3: invalid barcode — should show helpful no-product message
+  await lookupBarcode('0000000000000');
+  appendLog('Tests completed.');
+});
+
+// ---------- Initial log message ----------
+appendLog('Ready. Use "Use offline sample" to test without network, or click "Run fetch diagnostic" to check connectivity.');
+</script>
+</body>
+</html>
